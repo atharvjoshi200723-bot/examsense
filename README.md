@@ -45,7 +45,7 @@ uvicorn api.main:app --reload
 ```bash
 cd frontend
 npm install
-cp .env.local.example .env.local
+cp .env.example .env.local
 # Add your backend URL to .env.local
 npm run dev
 ```
