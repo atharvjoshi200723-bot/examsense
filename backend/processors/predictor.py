@@ -1,255 +1,122 @@
 """
-Predict likely exam questions using RAG retrieval + Gemini analysis.
-
-Uses past paper chunks from ChromaDB to build context, then asks Gemini
-for ranked predictions in structured JSON.
+Predictor - Predicts exam questions using RAG
 """
 
-import json
-import re
 import sys
+import os
+import json
 from pathlib import Path
-from typing import Any
-
-from google import genai
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from config import GEMINI_API_KEY  # noqa: E402
-from processors.rag_embedder import get_topic_frequency, search  # noqa: E402
+from config import GEMINI_API_KEY
+from processors.rag_embedder import search
+from google import genai
 
-GEMINI_MODEL = "gemini-2.0-flash-001"
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-# RAG queries used to gather exam-relevant chunks from past papers
-RAG_SEARCH_QUERIES = [
-    "important questions exam topics",
-    "most asked questions marks",
-    "unit wise questions syllabus",
-]
+def predict_questions(college, course, year, semester):
+    """Predict exam questions from past papers"""
+    try:
+        # Search with multiple queries
+        queries = [
+            "important questions exam topics marks",
+            "unit wise questions syllabus",
+            "most asked questions previous year"
+        ]
 
-TOP_CONTEXT_CHUNKS = 20
-SEARCH_TOP_K = 15
+        all_chunks = []
+        for query in queries:
+            results = search(
+                query,
+                college=college,
+                top_k=8
+            )
+            if results and results.get("documents"):
+                docs = results["documents"]
+                if docs and len(docs) > 0:
+                    all_chunks.extend(docs[0])
 
-# ── Gemini client (new google-genai library) ──────────────────────────────────
-_gemini_client: genai.Client | None = None
-if GEMINI_API_KEY:
-    _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        # Remove duplicates
+        seen = set()
+        unique_chunks = []
+        for chunk in all_chunks:
+            if chunk not in seen:
+                seen.add(chunk)
+                unique_chunks.append(chunk)
 
+        if not unique_chunks:
+            return {
+                "predicted_questions": [],
+                "hot_topics": [],
+                "safe_to_skip": [],
+                "study_tip": "No papers found for this college yet.",
+                "total_papers_analyzed": 0
+            }
 
-def _empty_prediction() -> dict[str, Any]:
-    """Fallback structure when retrieval or Gemini fails."""
-    return {
-        "predicted_questions": [],
-        "hot_topics": [],
-        "safe_to_skip": [],
-        "study_tip": "",
-        "total_papers_analyzed": 0,
-    }
+        # Take top 15 chunks as context
+        context = "\n\n---\n\n".join(unique_chunks[:15])
 
+        prompt = f"""You are an expert exam analyst for {college} university India.
 
-def _dedupe_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Remove duplicate chunks by ID, keeping the highest similarity score."""
-    best_by_id: dict[str, dict[str, Any]] = {}
-    for hit in results:
-        chunk_id = hit.get("id") or hit.get("text", "")
-        existing = best_by_id.get(chunk_id)
-        if existing is None or hit.get("similarity", 0) > existing.get("similarity", 0):
-            best_by_id[chunk_id] = hit
-    return sorted(best_by_id.values(), key=lambda h: h.get("similarity", 0), reverse=True)
-
-
-def _count_unique_papers(chunks: list[dict[str, Any]]) -> int:
-    """Count distinct source PDFs represented in the retrieved chunks."""
-    papers: set[tuple[str, str, str, str, str]] = set()
-    for hit in chunks:
-        meta = hit.get("metadata") or {}
-        key = (
-            str(meta.get("college", "")),
-            str(meta.get("course", "")),
-            str(meta.get("year", "")),
-            str(meta.get("semester", "")),
-            str(meta.get("filename", "")),
-        )
-        if key[-1]:
-            papers.add(key)
-    return len(papers)
-
-
-def _build_context(chunks: list[dict[str, Any]]) -> str:
-    """Join the top chunk texts into one context block for Gemini."""
-    sections: list[str] = []
-    for index, hit in enumerate(chunks[:TOP_CONTEXT_CHUNKS], start=1):
-        meta = hit.get("metadata") or {}
-        header = (
-            f"[Chunk {index} | {meta.get('filename', 'unknown')} | "
-            f"year {meta.get('year', '?')} | similarity {hit.get('similarity', 0):.2f}]"
-        )
-        sections.append(f"{header}\n{hit.get('text', '')}")
-    return "\n\n---\n\n".join(sections)
-
-
-def _build_prompt(
-    college: str,
-    course: str,
-    semester: str,
-    context: str,
-    papers_analyzed: int,
-) -> str:
-    """Prompt Gemini to return ranked predictions as JSON only."""
-    return f"""You are an expert exam analyst for {college} university India.
-
-Analyze these past {course} exam papers for semester {semester} carefully.
-
-Past paper excerpts ({papers_analyzed} unique papers represented):
-{context}
+Analyze these past {course} exam papers carefully.
 
 Return ONLY a valid JSON object with exactly this structure, no other text:
 {{
-  "predicted_questions": [
-    {{
-      "question": "full question text",
-      "topic": "topic name",
-      "years_appeared": [2021, 2022, 2023],
-      "frequency": 3,
-      "total_years": 5,
-      "probability_percent": 85,
-      "priority": "MUST_PREPARE",
-      "marks": 10,
-      "tip": "one line exam writing tip"
-    }}
-  ],
-  "hot_topics": ["topic1", "topic2", "topic3"],
-  "safe_to_skip": ["topic4", "topic5"],
-  "study_tip": "one overall study advice",
-  "total_papers_analyzed": {papers_analyzed}
+    "predicted_questions": [
+        {{
+            "question": "full question text here",
+            "topic": "topic name",
+            "years_appeared": [2021, 2022, 2023],
+            "frequency": 3,
+            "total_years": 5,
+            "probability_percent": 85,
+            "priority": "MUST_PREPARE",
+            "marks": 10,
+            "tip": "one line exam writing tip"
+        }}
+    ],
+    "hot_topics": ["topic1", "topic2", "topic3"],
+    "safe_to_skip": ["topic4", "topic5"],
+    "study_tip": "one overall study advice",
+    "total_papers_analyzed": 15
 }}
 
-Priority must be one of:
-MUST_PREPARE, IMPORTANT, OPTIONAL
-
+Priority must be one of: MUST_PREPARE, IMPORTANT, OPTIONAL
 Give exactly 15 predicted questions.
 Sort by probability_percent descending.
-Return ONLY the JSON, nothing else."""
+Base everything on these past papers:
 
+{context}
 
-def _parse_gemini_json(raw_text: str) -> dict[str, Any]:
-    """Parse Gemini output, stripping markdown fences if present."""
-    text = raw_text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s*```$", "", text)
+Return ONLY the JSON. No explanation. No markdown."""
 
-    parsed = json.loads(text)
-    if not isinstance(parsed, dict):
-        raise ValueError("Gemini response is not a JSON object.")
-    return parsed
-
-
-def _enrich_with_topic_frequency(
-    prediction: dict[str, Any],
-    college: str,
-    course: str,
-) -> dict[str, Any]:
-    """
-    Fill frequency fields from ChromaDB when Gemini omits or approximates them.
-    """
-    questions = prediction.get("predicted_questions") or []
-    for item in questions:
-        if not isinstance(item, dict):
-            continue
-        topic = item.get("topic")
-        if not topic:
-            continue
-        try:
-            freq = get_topic_frequency(str(topic), college, course)
-            if not item.get("years_appeared"):
-                item["years_appeared"] = freq.get("years_found", [])
-            if not item.get("frequency"):
-                item["frequency"] = freq.get("count", 0)
-            if not item.get("total_years"):
-                item["total_years"] = freq.get("total_years", 0)
-        except Exception:
-            continue
-    return prediction
-
-
-def predict_questions(
-    college: str,
-    course: str,
-    year: str,
-    semester: str,
-) -> dict[str, Any]:
-    """
-    Predict the 15 most likely exam questions for a college/course/semester.
-    """
-    _ = year  # reserved for future year-specific filtering
-
-    if not _gemini_client:
-        result = _empty_prediction()
-        result["study_tip"] = "GEMINI_API_KEY is not configured."
-        return result
-
-    try:
-        # Step 1: Run multiple RAG searches and merge results
-        combined: list[dict[str, Any]] = []
-        for query in RAG_SEARCH_QUERIES:
-            try:
-                hits = search(query, college, course, semester, top_k=SEARCH_TOP_K)
-                combined.extend(hits)
-            except Exception as exc:
-                print(f"Search failed for '{query}': {exc}")
-
-        deduped = _dedupe_results(combined)
-        if not deduped:
-            result = _empty_prediction()
-            result["study_tip"] = (
-                f"No past papers found in ChromaDB for {college} / {course} / {semester}."
-            )
-            return result
-
-        papers_analyzed = _count_unique_papers(deduped)
-
-        # Step 2: Build context from top chunks
-        context = _build_context(deduped)
-
-        # Step 3: Ask Gemini for structured predictions
-        prompt = _build_prompt(college, course, semester, context, papers_analyzed)
-        response = _gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-        )
-        raw_text = (response.text or "").strip()
-
-        if not raw_text:
-            result = _empty_prediction()
-            result["total_papers_analyzed"] = papers_analyzed
-            result["study_tip"] = "Gemini returned an empty response."
-            return result
-
-        # Step 4: Parse JSON safely
-        try:
-            prediction = _parse_gemini_json(raw_text)
-        except (json.JSONDecodeError, ValueError) as exc:
-            print(f"Failed to parse Gemini JSON: {exc}")
-            result = _empty_prediction()
-            result["total_papers_analyzed"] = papers_analyzed
-            result["study_tip"] = "Could not parse prediction response."
-            return result
-
-        prediction.setdefault("predicted_questions", [])
-        prediction.setdefault("hot_topics", [])
-        prediction.setdefault("safe_to_skip", [])
-        prediction.setdefault("study_tip", "")
-        prediction["total_papers_analyzed"] = prediction.get(
-            "total_papers_analyzed", papers_analyzed
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
         )
 
-        return _enrich_with_topic_frequency(prediction, college, course)
+        text = response.text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
 
-    except Exception as exc:
-        print(f"predict_questions failed: {exc}")
-        result = _empty_prediction()
-        result["study_tip"] = f"Prediction failed: {exc}"
+        result = json.loads(text)
         return result
+
+    except json.JSONDecodeError:
+        return {
+            "predicted_questions": [],
+            "hot_topics": [],
+            "safe_to_skip": [],
+            "study_tip": "Error parsing predictions. Try again.",
+            "total_papers_analyzed": 0
+        }
+    except Exception as e:
+        return {
+            "predicted_questions": [],
+            "hot_topics": [],
+            "safe_to_skip": [],
+            "study_tip": f"Error: {str(e)}",
+            "total_papers_analyzed": 0
+        }

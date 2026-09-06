@@ -1,97 +1,101 @@
 """
-ExamSense — Multi-source Ingestion Script.
-
-Runs one time to scrape all papers from GitHub, UPES Library, and Manipal Library,
-extracting text and storing them into ChromaDB for RAG.
+ExamSense Ingestion Pipeline - Fixed Version
+- Silences PyTorch MPS warnings
+- Two-layer OCR forcing system
+- 384-dimension local embeddings
+- Emergency fallback chunking
 """
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 import os
 import sys
 from pathlib import Path
 
-# Add backend directory to sys.path to allow consistent imports
 BACKEND_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from scrapers import github_scraper, upes_scraper, manipal_scraper
-from processors import pdf_reader, rag_embedder
+from scrapers import github_scraper
+from processors.pdf_reader import extract_text
+from processors.rag_embedder import embed_and_store, get_stats
 
 
-def process_and_delete(filepath: str | Path, metadata: dict) -> None:
+def is_text_useful(text):
     """
-    Callback function to extract text, embed, store, and then delete the temp file.
+    Check if extracted text is actually useful.
+    Filters out empty strings and hidden control characters.
     """
-    path = Path(filepath)
-    filename = metadata.get("filename", path.name)
+    if not text:
+        return False
+    cleaned = ''.join(
+        c for c in text
+        if c.isprintable() and not c.isspace()
+    )
+    return len(cleaned) > 100
 
+
+def process_and_delete(filepath, metadata):
+    """
+    Main callback for each PDF.
+    Two-layer system:
+    Layer 1 → Try direct extraction
+    Layer 2 → Force EasyOCR if text too short
+    """
     try:
-        # Step 1: Extract text from PDF
-        result = pdf_reader.extract_text(path)
+        filename = metadata.get('filename', filepath)
 
-        if result.get("success"):
-            # Step 2: Chunk, embed, and store in ChromaDB
-            chunks_stored = rag_embedder.embed_and_store(result["text"], metadata)
+        # LAYER 1: Direct text extraction
+        result = extract_text(filepath)
+        text = result.get("text", "")
+
+        # LAYER 2: Force OCR if text is weak
+        if not is_text_useful(text):
+            print(f"    → Weak text detected, forcing EasyOCR...")
+            from processors.pdf_reader import extract_with_easyocr
+            result = extract_with_easyocr(filepath)
+            text = result.get("text", "")
+
+        # Store in ChromaDB
+        if is_text_useful(text):
+            chunks_stored = embed_and_store(text, metadata)
             print(f"✅ {filename} - {chunks_stored} chunks stored")
         else:
-            # Report failure
-            error_msg = result.get("error", "Unknown extraction error")
-            print(f"❌ {filename} - {error_msg}")
+            print(f"❌ {filename} - No usable text extracted")
 
-    except Exception as exc:
-        print(f"❌ {filename} - unexpected error: {exc}")
+    except Exception as e:
+        print(f"❌ {metadata.get('filename', 'unknown')} - Error: {e}")
 
     finally:
-        # Step 3: Always delete the temporary file
-        if path.exists():
-            try:
-                path.unlink()
-            except OSError as exc:
-                print(f"  Warning: could not delete temp file {path} — {exc}")
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except:
+            pass
 
 
 def run_ingestion():
-    """
-    Orchestrate the entire ingestion pipeline.
-    """
-    print("\n" + "=" * 50)
+    print("=" * 50)
     print("🚀 ExamSense Ingestion Started")
     print("=" * 50)
 
-    # Show initial stats
-    print("\n[ChromaDB Initial Stats]")
-    stats_before = rag_embedder.get_stats()
+    stats_before = get_stats()
+    print(f"\n[ChromaDB Initial Stats]")
     print(f"Total chunks: {stats_before['total_chunks']}")
     print(f"Total papers: {stats_before['total_documents']}")
 
-    # 1. GitHub Scraper (GraphicEra only)
     print("\n[1/3] Scraping GitHub (GraphicEra only)...")
-    from config import GITHUB_TOKEN
-    scraper = github_scraper.GitHubScraper("GraphicEra", "gehuhaldwani/pyqs", token=GITHUB_TOKEN)
-    scraper.run(process_fn=process_and_delete)
+    try:
+        github_scraper.run_all(process_and_delete)
+    except Exception as e:
+        print(f"Scraping error: {e}")
 
-    # 2. UPES Library Scraper (Skipped)
-    print("\n[2/3] Scraping UPES Library... (Skipped)")
-    # upes_scraper.run(process_fn=process_and_delete)
-
-    # 3. Manipal Library Scraper (Skipped)
-    print("\n[3/3] Scraping Manipal Library... (Skipped)")
-    # manipal_scraper.run(process_fn=process_and_delete)
-
-    # Final Summary
+    stats_after = get_stats()
     print("\n" + "=" * 50)
     print("✅ Ingestion Complete!")
-    print("=" * 50)
-
-    stats_after = rag_embedder.get_stats()
     print(f"Total chunks stored: {stats_after['total_chunks']}")
-    print(f"Total papers stored: {stats_after['total_documents']}")
-    
-    print("\n[Breakdown by College]")
-    for college, count in stats_after.get("by_college", {}).items():
-        diff = count - stats_before.get("by_college", {}).get(college, 0)
-        print(f"- {college}: {count} chunks (new: {diff})")
-    print("=" * 50 + "\n")
+    print("=" * 50)
 
 
 if __name__ == "__main__":

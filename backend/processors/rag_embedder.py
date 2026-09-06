@@ -1,7 +1,10 @@
 """
-RAG Embedder - Stores and searches paper chunks in ChromaDB
-Uses google-genai 2.8.0 library
+RAG Embedder - Local embeddings, zero API quota
+Uses sentence-transformers (runs on laptop, free forever)
 """
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 import os
 import sys
@@ -11,13 +14,16 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from config import GEMINI_API_KEY, CHROMA_DIR
+from config import CHROMA_DIR
 import chromadb
-from google import genai
-from google.genai import types
+from sentence_transformers import SentenceTransformer
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Load model once, reuse forever
+print("Loading embedding model...")
+_model = SentenceTransformer('all-MiniLM-L6-v2')
+print("Embedding model loaded!")
 
+# ChromaDB setup
 chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
 collection = chroma_client.get_or_create_collection(
     name="examsense",
@@ -25,6 +31,7 @@ collection = chroma_client.get_or_create_collection(
 )
 
 def chunk_text(text, chunk_size=400, overlap=60):
+    """Split text into overlapping chunks"""
     words = text.split()
     chunks = []
     start = 0
@@ -34,27 +41,31 @@ def chunk_text(text, chunk_size=400, overlap=60):
         if chunk.strip():
             chunks.append(chunk)
         start = end - overlap
+        if start >= len(words):
+            break
     return chunks
 
 def get_embedding(text):
+    """Get embedding using local model - no API needed"""
     try:
-        result = client.models.embed_content(
-            model="models/gemini-embedding-001",
-            contents=text,
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_DOCUMENT"
-            )
-        )
-        return result.embeddings[0].values
+        embedding = _model.encode(text)
+        return embedding.tolist()
     except Exception as e:
         print(f"Embedding error: {e}")
         return None
 
 def embed_and_store(text, metadata):
+    """Embed text and store in ChromaDB"""
     if not text or len(text.strip()) < 50:
         return 0
 
     chunks = chunk_text(text)
+
+    # Emergency fallback if chunker returns 0
+    if len(chunks) == 0 and len(text.strip()) > 0:
+        print(f"    → Emergency fallback chunk created")
+        chunks = [text.strip()[:1000]]
+
     stored = 0
 
     for i, chunk in enumerate(chunks):
@@ -97,23 +108,23 @@ def embed_and_store(text, metadata):
 
     return stored
 
-def search(query, college, course,
-           semester=None, top_k=10):
-    try:
-        query_embedding = client.models.embed_content(
-            model="models/gemini-embedding-001",
-            contents=query,
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_QUERY"
-            )
-        )
-        query_vector = query_embedding.embeddings[0].values
 
+def search(query, college, course=None,
+           semester=None, top_k=10):
+    """
+    Search ChromaDB for similar content.
+    Only filters by college because VIT papers
+    are stored as course='all papers'
+    """
+    try:
+        query_vector = get_embedding(query)
+        if query_vector is None:
+            return None
+
+        # Only filter by college
+        # Handles VIT structure where course = "all papers"
         where_filter = {
-            "$and": [
-                {"college": {"$eq": college}},
-                {"course": {"$eq": course}}
-            ]
+            "college": {"$eq": college}
         }
 
         results = collection.query(
@@ -128,20 +139,26 @@ def search(query, college, course,
         print(f"Search error: {e}")
         return None
 
-def get_topic_frequency(topic, college, course):
+
+def get_topic_frequency(topic, college, course=None):
+    """Find how many years a topic appeared"""
     try:
-        results = search(topic, college, course,
-                        top_k=50)
+        results = search(
+            topic, college,
+            top_k=50
+        )
         if not results:
-            return {"topic": topic,
-                    "count": 0,
-                    "years_found": [],
-                    "total_years": 0}
+            return {
+                "topic": topic,
+                "count": 0,
+                "years_found": [],
+                "total_years": 0
+            }
 
         years = set()
         for meta in results.get("metadatas", [[]])[0]:
             year = meta.get("year", "")
-            if year:
+            if year and year != "unknown":
                 years.add(year)
 
         return {
@@ -153,10 +170,16 @@ def get_topic_frequency(topic, college, course):
 
     except Exception as e:
         print(f"Frequency error: {e}")
-        return {"topic": topic, "count": 0,
-                "years_found": [], "total_years": 0}
+        return {
+            "topic": topic,
+            "count": 0,
+            "years_found": [],
+            "total_years": 0
+        }
+
 
 def get_stats():
+    """Get ChromaDB statistics"""
     try:
         count = collection.count()
         return {
@@ -166,6 +189,8 @@ def get_stats():
         }
     except Exception as e:
         print(f"Stats error: {e}")
-        return {"total_chunks": 0,
-                "total_documents": 0,
-                "by_college": {}}
+        return {
+            "total_chunks": 0,
+            "total_documents": 0,
+            "by_college": {}
+        }
