@@ -33,7 +33,8 @@ app = FastAPI(title="ExamSense API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8000"],
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,37 +46,50 @@ def on_startup() -> None:
     print("ExamSense API running!")
 
 
+# ── Defaults for college dropdowns when filesystem archives are empty ─────────
+DEFAULT_COURSES = {
+    "GraphicEra": ["BTech", "BCA", "BBA", "MBA", "MCA", "BSc", "BPharma"],
+    "VIT": ["BTech", "MTech", "BCA", "MCA", "BSc"],
+    "SRM": ["BTech", "MTech", "BCA", "BBA"],
+    "BITS": ["BTech", "MTech", "MSc", "BPharm"],
+    "UPES": ["BTech", "BCA", "BBA", "LLB", "MBA"],
+    "Manipal": ["BTech", "MTech", "BCA", "BBA"]
+}
+DEFAULT_YEARS = ["Year 1", "Year 2", "Year 3", "Year 4"]
+DEFAULT_SEMESTERS = ["Sem 1", "Sem 2", "Sem 3", "Sem 4", "Sem 5", "Sem 6", "Sem 7", "Sem 8"]
+
+
 # ── Request models ────────────────────────────────────────────────────────────
 class PredictRequest(BaseModel):
-    college: str
-    course: str
-    year: str
-    semester: str
+    college: str = Field(..., min_length=1)
+    course: str = Field(..., min_length=1)
+    year: str = ""
+    semester: str = ""
 
 
 class ModelPaperRequest(BaseModel):
-    college: str
-    course: str
-    year: str
-    semester: str
+    college: str = Field(..., min_length=1)
+    course: str = Field(..., min_length=1)
+    year: str = ""
+    semester: str = ""
 
 
 class FlashcardsRequest(BaseModel):
-    college: str
-    course: str
-    semester: str
+    college: str = Field(..., min_length=1)
+    course: str = Field(..., min_length=1)
+    semester: str = ""
 
 
 class QuizRequest(BaseModel):
-    college: str
-    course: str
-    semester: str
+    college: str = Field(..., min_length=1)
+    course: str = Field(..., min_length=1)
+    semester: str = ""
 
 
 class AskRequest(BaseModel):
-    college: str
-    course: str
-    semester: str
+    college: str = Field(..., min_length=1)
+    course: str = Field(..., min_length=1)
+    semester: str = ""
     question: str = Field(..., min_length=1)
 
 
@@ -124,40 +138,71 @@ def get_colleges() -> dict[str, list[str]]:
 
 @app.get("/courses")
 def get_courses(college: str) -> dict[str, list[str]]:
-    """List course folders under data/papers/{college}/."""
+    """List course folders or fall back to ChromaDB metadata / defaults."""
+    if not college or not college.strip():
+        raise HTTPException(status_code=400, detail="college parameter is required.")
     college = _safe_path_part(college, "college")
     courses = _list_subfolders(PAPERS_ROOT / college)
+    if not courses:
+        # Check ChromaDB metadatas
+        try:
+            metas = rag_embedder.collection.get(where={"college": college}, include=["metadatas"])["metadatas"]
+            discovered = set()
+            for m in metas:
+                c = m.get("course")
+                if c and c.lower() not in ("all papers", "general", "unknown"):
+                    discovered.add(c.title() if c.islower() else c)
+            if discovered:
+                courses = sorted(list(discovered))
+        except Exception:
+            pass
+
+    if not courses:
+        courses = DEFAULT_COURSES.get(college, DEFAULT_COURSES["GraphicEra"])
+
     return {"courses": courses}
 
 
 @app.get("/years")
 def get_years(college: str, course: str) -> dict[str, list[str]]:
-    """List year folders under data/papers/{college}/{course}/."""
+    """List year folders or fall back to defaults."""
+    if not college or not course:
+        raise HTTPException(status_code=400, detail="college and course parameters are required.")
     college = _safe_path_part(college, "college")
     course = _safe_path_part(course, "course")
     years = _list_subfolders(PAPERS_ROOT / college / course)
+    if not years:
+        years = DEFAULT_YEARS
     return {"years": years}
 
 
 @app.get("/semesters")
-def get_semesters(college: str, course: str, year: str) -> dict[str, list[str]]:
-    """List semester folders under data/papers/{college}/{course}/{year}/."""
+def get_semesters(college: str, course: str, year: str = "") -> dict[str, list[str]]:
+    """List semester folders or fall back to defaults."""
+    if not college or not course:
+        raise HTTPException(status_code=400, detail="college and course parameters are required.")
     college = _safe_path_part(college, "college")
     course = _safe_path_part(course, "course")
-    year = _safe_path_part(year, "year")
-    semesters = _list_subfolders(PAPERS_ROOT / college / course / year)
+    semesters = []
+    if year:
+        clean_year = _safe_path_part(year, "year")
+        semesters = _list_subfolders(PAPERS_ROOT / college / course / clean_year)
+    if not semesters:
+        semesters = DEFAULT_SEMESTERS
     return {"semesters": semesters}
 
 
 @app.post("/predict")
 def predict(body: PredictRequest) -> dict[str, Any]:
     """Predict likely exam questions from indexed past papers."""
+    if not body.college.strip() or not body.course.strip():
+        raise HTTPException(status_code=400, detail="college and course are required.")
     try:
         return predictor.predict_questions(
-            body.college,
-            body.course,
-            body.year,
-            body.semester,
+            body.college.strip(),
+            body.course.strip(),
+            body.year.strip(),
+            body.semester.strip(),
         )
     except Exception as exc:
         raise HTTPException(

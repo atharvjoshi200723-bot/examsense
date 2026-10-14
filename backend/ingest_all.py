@@ -46,13 +46,13 @@ def process_and_delete(filepath, metadata):
     try:
         filename = metadata.get('filename', filepath)
 
-        # LAYER 1: Direct text extraction
+        # LAYER 1: Direct text extraction (extract_text already falls back to OCR if scanned)
         result = extract_text(filepath)
         text = result.get("text", "")
 
-        # LAYER 2: Force OCR if text is weak
-        if not is_text_useful(text):
-            print(f"    → Weak text detected, forcing EasyOCR...")
+        # Fallback to OCR only if direct text was too short and OCR wasn't already attempted
+        if not is_text_useful(text) and result.get("method") != "easyocr":
+            print(f"    → Weak text detected, attempting EasyOCR...")
             from processors.pdf_reader import extract_with_easyocr
             result = extract_with_easyocr(filepath)
             text = result.get("text", "")
@@ -85,9 +85,12 @@ def run_ingestion():
     print(f"Total chunks: {stats_before['total_chunks']}")
     print(f"Total papers: {stats_before['total_documents']}")
 
-    print("\n[1/3] Scraping GitHub (GraphicEra only)...")
+    print("\nScraping GitHub (GraphicEra)...")
     try:
-        github_scraper.run_all(process_and_delete)
+        from scrapers.github_scraper import GitHubScraper, COLLEGE_REPOS
+        ge_repo = COLLEGE_REPOS.get("GraphicEra", "gehuhaldwani/pyqs")
+        scraper = GitHubScraper("GraphicEra", ge_repo)
+        scraper.run(process_and_delete)
     except Exception as e:
         print(f"Scraping error: {e}")
 

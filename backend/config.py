@@ -6,10 +6,16 @@ load_dotenv()
 # API Keys
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODELS = [GEMINI_MODEL, "gemini-3.5-flash", "gemini-flash-latest"]
+
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
 
 # Paths
-PAPERS_DIR = "./data/papers"
-CHROMA_DIR = "./data/chromadb"
+PAPERS_DIR = str(BASE_DIR / "data" / "papers")
+CHROMA_DIR = str(BASE_DIR / "data" / "chromadb")
 
 # All college data sources
 COLLEGE_SOURCES = {

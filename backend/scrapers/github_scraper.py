@@ -84,15 +84,22 @@ def parse_path_metadata(college: str, repo_path: str) -> dict:
     Example: BTech/Year2/Sem4/paper.pdf → course, year2, sem4
     """
     parts = Path(repo_path).parts[:-1]
+    filename = Path(repo_path).name
     course = "general"
     year = "unknown"
     semester = "unknown"
+    subject = "general"
+
+    # Check 4-digit calendar year in filename or path
+    year_file_match = re.search(r"\b(20[0-2]\d)\b", filename)
+    if year_file_match:
+        year = year_file_match.group(1)
 
     for part in parts:
         year_match = YEAR_PATTERN.search(part)
-        if year_match:
+        if year_match and year == "unknown":
             n = next(g for g in year_match.groups() if g is not None)
-            year = f"year{n}"
+            year = n if len(n) == 4 else f"year{n}"
             continue
 
         sem_match = SEM_PATTERN.search(part)
@@ -102,18 +109,36 @@ def parse_path_metadata(college: str, repo_path: str) -> dict:
             continue
 
         normalized = part.lower().replace("-", "").replace("_", "")
-        if normalized in SKIP_DIR_NAMES or part.startswith("."):
+        if normalized in SKIP_DIR_NAMES or part.startswith(".") or normalized in ("end", "mid", "old", "seta", "setb", "setc"):
             continue
 
         if course == "general":
             course = _safe_segment(part)
+        elif subject == "general":
+            subject = _safe_segment(part)
+
+    # Normalize course capitalization for consistency with frontend
+    c_lower = course.lower().replace(".", "").replace(" ", "")
+    if c_lower == "btech":
+        course = "BTech"
+    elif c_lower == "bca":
+        course = "BCA"
+    elif c_lower == "bba":
+        course = "BBA"
+    elif c_lower == "mba":
+        course = "MBA"
+    elif c_lower == "mca":
+        course = "MCA"
+    elif "pharma" in c_lower:
+        course = "BPharma"
 
     return {
         "college": college,
         "course": _safe_segment(course),
+        "subject": _safe_segment(subject),
         "year": _safe_segment(year),
         "semester": _safe_segment(semester),
-        "filename": _safe_segment(Path(repo_path).name),
+        "filename": _safe_segment(filename),
         "repo_path": repo_path,
     }
 

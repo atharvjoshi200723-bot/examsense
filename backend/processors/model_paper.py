@@ -11,14 +11,15 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from config import GEMINI_API_KEY  # noqa: E402
-
-GEMINI_MODEL = "gemini-2.0-flash-001"
+from config import GEMINI_API_KEY, GEMINI_MODEL  # noqa: E402
 
 # ── Gemini client (new google-genai library) ──────────────────────────────────
 _gemini_client: genai.Client | None = None
 if GEMINI_API_KEY:
-    _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    try:
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        print(f"Error initializing Gemini client in model_paper: {e}")
 
 
 def _format_hot_topics(hot_topics: list[str] | str) -> str:

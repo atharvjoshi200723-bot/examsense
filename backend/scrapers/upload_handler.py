@@ -57,6 +57,17 @@ def _read_upload(file: Any) -> tuple[bytes, str, str | None]:
     filename = getattr(file, "filename", None) or getattr(file, "name", None) or "upload.pdf"
     content_type = getattr(file, "content_type", None)
 
+    # FastAPI UploadFile wraps an underlying synchronous file in .file
+    spooled = getattr(file, "file", None)
+    if spooled is not None and hasattr(spooled, "read") and callable(spooled.read):
+        content = spooled.read()
+        if hasattr(spooled, "seek") and callable(spooled.seek):
+            try:
+                spooled.seek(0)
+            except Exception:
+                pass
+        return content, filename, content_type
+
     if hasattr(file, "read") and callable(file.read):
         content = file.read()
         if isinstance(content, str):

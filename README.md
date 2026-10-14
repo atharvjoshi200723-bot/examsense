@@ -9,7 +9,8 @@
 - VIT Vellore
 - SRM Institute of Science and Technology
 - BITS Pilani
-- Graphic Era Hill University
+- Graphic Era 
+   University
 - UPES Dehradun
 - Manipal Academy of Higher Education
 

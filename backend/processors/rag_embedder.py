@@ -112,27 +112,65 @@ def embed_and_store(text, metadata):
 def search(query, college, course=None,
            semester=None, top_k=10):
     """
-    Search ChromaDB for similar content.
-    Only filters by college because VIT papers
-    are stored as course='all papers'
+    Search ChromaDB for similar content with metadata filtering.
+    Falls back gracefully if strict course/semester filters return empty.
     """
     try:
         query_vector = get_embedding(query)
         if query_vector is None:
             return None
 
-        # Only filter by college
-        # Handles VIT structure where course = "all papers"
-        where_filter = {
-            "college": {"$eq": college}
-        }
+        # Build filter criteria
+        filters = [{"college": {"$eq": college}}]
 
-        results = collection.query(
-            query_embeddings=[query_vector],
-            n_results=top_k,
-            where=where_filter
-        )
+        # Check course filtering (skip generic placeholders)
+        if course and str(course).strip() and str(course).strip().lower() not in ("all papers", "general", "all"):
+            filters.append({"course": {"$eq": str(course).strip()}})
 
+        # Check semester filtering (normalize sem format)
+        if semester and str(semester).strip():
+            sem_val = str(semester).strip()
+            # Normalize e.g. "Sem 1" -> "sem1" or keep as is
+            sem_clean = sem_val.lower().replace(" ", "")
+            # We match on either the exact string or normalized form
+            filters.append({"semester": {"$in": [sem_val, sem_clean]}})
+
+        where_filter = filters[0] if len(filters) == 1 else {"$and": filters}
+
+        results = None
+        try:
+            results = collection.query(
+                query_embeddings=[query_vector],
+                n_results=top_k,
+                where=where_filter
+            )
+        except Exception as filter_err:
+            print(f"Filtered query failed, falling back to college filter: {filter_err}")
+            results = None
+
+        # If filtered search returned nothing or failed, fallback to college-only search
+        if not results or not results.get("documents") or not results["documents"][0]:
+            results = collection.query(
+                query_embeddings=[query_vector],
+                n_results=top_k,
+                where={"college": {"$eq": college}}
+            )
+
+        # Unpack structured hits for consumers like flashcards/quiz/ask
+        docs = (results.get("documents") or [[]])[0]
+        metas = (results.get("metadatas") or [[]])[0]
+        dists = (results.get("distances") or [[]])[0] if results.get("distances") else []
+        hits = []
+        for i, doc in enumerate(docs):
+            meta = metas[i] if i < len(metas) else {}
+            dist = dists[i] if i < len(dists) else 0.0
+            similarity = max(0.0, 1.0 - float(dist)) if dist is not None else 1.0
+            hits.append({
+                "text": doc,
+                "metadata": meta,
+                "similarity": similarity
+            })
+        results["hits"] = hits
         return results
 
     except Exception as e:

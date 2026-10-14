@@ -11,5 +11,5 @@ python-multipart
 selenium
 webdriver-manager
 beautifulsoup4
-
+sentence-transformers
 easyocr

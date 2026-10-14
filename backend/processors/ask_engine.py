@@ -14,16 +14,18 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from config import GEMINI_API_KEY  # noqa: E402
+from config import GEMINI_API_KEY, GEMINI_MODEL  # noqa: E402
 from processors.rag_embedder import search  # noqa: E402
 
-GEMINI_MODEL = "gemini-2.0-flash-001"
 SEARCH_TOP_K = 8
 
 # ── Gemini client (new google-genai library) ──────────────────────────────────
 _gemini_client: genai.Client | None = None
 if GEMINI_API_KEY:
-    _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    try:
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        print(f"Error initializing Gemini client in ask_engine: {e}")
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -130,7 +132,13 @@ def ask_question(
                 "Upload papers or run ingestion first."
             )
 
-        context = _build_context(hits)
+        chunk_list = hits.get("hits", []) if isinstance(hits, dict) else hits
+        if not chunk_list:
+            return _error_response(
+                f"No past papers found for {college} / {course} / {semester}."
+            )
+
+        context = _build_context(chunk_list)
 
         prompt = _build_prompt(college, course, question, context)
         response = _gemini_client.models.generate_content(
